@@ -90,12 +90,14 @@
     weeks: new Map(), months: new Map(), plan: { ...DEFAULT_PLAN }, planSaved: false, invites: [], members: [],
     view: "week", wk: ymd(mondayOf(new Date())), mo: null, loading: false,
     dirty: { w: false, m: false, p: false },
+    admin: false, creators: [],   // 관리자 모드: 화면 표시용 판단일 뿐, 실제 권한은 서버 함수가 매번 확인
   };
   S.mo = ymOfWeek(S.wk);
   const isOwner = () => S.cur && S.cur.role === "owner";
+  const storeTabs = () => (S.cur ? (isOwner() ? OWNER_TABS : STAFF_TABS) : []);
 
   // ---------- 화면 전환 ----------
-  const SCREENS = ["screen-config", "screen-login", "screen-nostore", "view-dash", "view-week", "view-month", "view-plan", "view-members"];
+  const SCREENS = ["screen-config", "screen-login", "screen-nostore", "view-dash", "view-week", "view-month", "view-plan", "view-members", "view-admin"];
   function show(id) { for (const s of SCREENS) $("#" + s).hidden = s !== id; }
 
   // ---------- 폼 공통 ----------
@@ -141,10 +143,11 @@
     return out;
   }
   function armDelete(btn, label, action) {
-    let armed = false, timer;
-    const reset = () => { armed = false; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
+    let armed = false, timer, orig = label;
+    const reset = () => { armed = false; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = orig; };
     btn.addEventListener("click", async () => {
-      if (!armed) { armed = true; btn.classList.add("armed"); btn.textContent = "한 번 더 누르면 실행"; timer = setTimeout(reset, 3500); return; }
+      // 누르기 직전 글자를 기억했다가 되돌림 (상태에 따라 글자가 바뀌는 버튼 대응)
+      if (!armed) { orig = btn.textContent || label; armed = true; btn.classList.add("armed"); btn.textContent = "한 번 더 누르면 실행"; timer = setTimeout(reset, 3500); return; }
       reset(); await action();
     });
   }
@@ -206,16 +209,22 @@
     rp.hidden = !S.cur; rp.textContent = isOwner() ? "사장" : "직원"; rp.className = "pill" + (isOwner() ? " good" : "");
     $("#storeTitle").textContent = S.cur ? `${S.cur.name} 가계부` : "매장 주간 가계부";
     const tabs = $("#tabs"); tabs.replaceChildren();
-    const list = S.cur ? (isOwner() ? OWNER_TABS : STAFF_TABS) : [];
+    const list = [...storeTabs(), ...(S.admin && S.cur ? [["admin", "관리자"]] : [])];
     tabs.hidden = list.length < 2;
     for (const [v, label] of list) {
       const b = el("button", { type: "button", textContent: label }); b.setAttribute("role", "tab"); b.setAttribute("aria-selected", String(v === S.view));
-      b.addEventListener("click", async () => { S.view = v; store.set("ledger.view", v); if (v === "members") await run(null, loadMembers); render(); window.scrollTo({ top: 0 }); });
+      b.addEventListener("click", async () => {
+        S.view = v; if (v !== "admin") store.set("ledger.view", v);
+        if (v === "members") await run(null, loadMembers);
+        if (v === "admin") await run(null, loadCreators);
+        render(); window.scrollTo({ top: 0 });
+      });
       tabs.append(b);
     }
   }
   function render() {
     renderHeader();
+    if (S.view === "admin" && S.admin) { show("view-admin"); renderAdmin(); return; }
     if (!S.cur) return;
     const allowed = (isOwner() ? OWNER_TABS : STAFF_TABS).map(([v]) => v);
     if (!allowed.includes(S.view)) S.view = allowed[0];
@@ -510,9 +519,61 @@
     $("#createTitle").textContent = extra ? "새 매장 추가" : "매장을 만들어 시작하세요";
     $("#createCancel").hidden = !extra;
     $("#inviteHint").textContent = extra ? "" : `직원으로 초대받으셨다면 사장님께 이 이메일(${S.user.email})로 초대를 요청하세요. 초대된 뒤 다시 로그인하면 매장이 보입니다. 매장 만들기는 관리자가 등록한 이메일만 할 수 있어요.`;
+    $("#adminOpenBtn").hidden = !S.admin || extra;
     $("#tabs").hidden = true;
     show("screen-nostore");
   }
+
+  // ---------- 관리자 모드 ----------
+  async function loadCreators() { S.creators = must(await S.sb.rpc("admin_list_creators")) || []; }
+  function renderAdmin() {
+    $("#adminBackRow").hidden = !!S.cur;
+    const open = S.creators.some((c) => c.email === "*");
+    $("#openState").textContent = open
+      ? "지금은 누구나 가입해서 매장을 만들 수 있어요. 무료 요금제 용량을 모르는 사람이 쓸 수 있으니 필요할 때만 켜 두세요."
+      : "지금은 아래 목록에 등록된 이메일만 매장을 만들 수 있어요.";
+    const tg = $("#openToggle");
+    tg.textContent = open ? "등록된 이메일만 허용으로 바꾸기" : "누구나 매장 만들기 허용"; tg.dataset.open = String(open);
+    tg.classList.toggle("danger", !open);
+    const t = $("#creatorTable"); t.replaceChildren();
+    t.append(el("thead", {}, el("tr", {}, ...["이메일", "가입", "만든 매장", "등록일", ""].map((h) => el("th", { className: "l", textContent: h })))));
+    const tb = el("tbody");
+    for (const c of S.creators.filter((c) => c.email !== "*")) {
+      const act = el("td", { className: "l" });
+      const b = el("button", { type: "button", className: "btn danger", textContent: "등록 삭제" });
+      b.style.padding = "4px 10px"; b.style.fontSize = "13px";
+      armDelete(b, "등록 삭제", () => run(b, async () => {
+        const removed = must(await S.sb.rpc("admin_remove_creator", { p_email: c.email }));
+        if (!removed) throw { friendly: "이미 삭제된 이메일이에요." };
+        await loadCreators(); renderAdmin();
+      }, `${c.email} 등록을 삭제했어요.`));
+      act.append(b);
+      tb.append(el("tr", {}, el("td", { className: "l", textContent: c.email }),
+        el("td", { className: "l" }, el("span", { className: "pill" + (c.signed_up ? " good" : ""), textContent: c.signed_up ? "가입함" : "아직" })),
+        el("td", { className: "l", textContent: `${c.owned_stores || 0}개` }),
+        el("td", { className: "l", textContent: String(c.created_at || "").slice(0, 10) }), act));
+    }
+    if (!tb.children.length) tb.append(el("tr", {}, el("td", { colSpan: 5, className: "l muted", textContent: "등록된 이메일이 없어요." })));
+    t.append(tb);
+  }
+  $("#adminAddForm").addEventListener("submit", (e) => {
+    e.preventDefault(); const email = $("#adminEmail").value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("이메일 주소를 확인해 주세요."); return; }
+    run($("#adminAddBtn"), async () => {
+      const { data, error } = await S.sb.rpc("admin_add_creator", { p_email: email });
+      if (error && error.code === "22023") throw { friendly: "이메일 형식이 올바르지 않아요." };
+      if (error) throw error;
+      if (!data) throw { friendly: `${email} 은(는) 이미 등록돼 있어요.` };
+      $("#adminEmail").value = ""; await loadCreators(); renderAdmin();
+    }, `${email} 을(를) 등록했어요. 앱 주소를 보내 주세요.`);
+  });
+  armDelete($("#openToggle"), "", () => run($("#openToggle"), async () => {
+    const open = $("#openToggle").dataset.open === "true";
+    must(await S.sb.rpc(open ? "admin_remove_creator" : "admin_add_creator", { p_email: "*" }));
+    await loadCreators(); renderAdmin();
+  }, "설정을 바꿨어요."));
+  $("#adminOpenBtn").addEventListener("click", async () => { S.view = "admin"; await run(null, loadCreators); render(); });
+  $("#adminBackBtn").addEventListener("click", () => { S.view = ""; showCreate(false); });
 
   $("#loginForm").addEventListener("submit", async (e) => {
     e.preventDefault(); const email = $("#loginEmail").value.trim();
@@ -537,6 +598,9 @@
     try {
       const n = must(await S.sb.rpc("accept_invites"));
       if (n > 0) toast(`초대 ${n}건을 받아 매장에 들어왔어요.`);
+      // 관리자 여부 (서버에 003 마이그레이션이 없으면 에러 → 관리자 아님으로 처리)
+      const adm = await S.sb.rpc("am_i_admin");
+      S.admin = !adm.error && adm.data === true;
       await loadStores();
       if (!S.cur) { renderHeader(); showCreate(false); return; }
       store.set("ledger.store", S.cur.store_id);
@@ -548,6 +612,7 @@
   }
   function signedOut() {
     S.user = null; S.stores = []; S.cur = null; S.weeks = new Map(); S.months = new Map(); S.invites = []; S.members = [];
+    S.admin = false; S.creators = [];
     // 다음에 로그인하는 사람이 이전 사람의 화면 위치(보던 주·달·탭)를 이어받지 않게 초기화
     S.view = ""; S.wk = ymd(mondayOf(new Date())); S.mo = ymOfWeek(S.wk); S.dirty = { w: false, m: false, p: false };
     renderHeader(); $("#tabs").hidden = true; show("screen-login");
