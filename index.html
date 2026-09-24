@@ -209,7 +209,39 @@ table.plain { min-width: 0; }
         <button class="btn" type="button" id="createCancel" hidden>취소</button>
       </div>
       <p class="muted small" style="margin:0" id="inviteHint"></p>
+      <button class="btn" type="button" id="adminOpenBtn" hidden>관리자 화면 열기</button>
     </form>
+  </section>
+
+  <!-- 관리자 -->
+  <section class="view" id="view-admin" hidden>
+    <div class="banner info">
+      <div>관리자 화면입니다. 여기서 <b>매장을 만들 수 있는 사장님 이메일</b>을 관리해요. 직원은 각 매장의 '구성원' 탭에서 초대하므로 여기 등록할 필요가 없어요.</div>
+    </div>
+    <div class="row" id="adminBackRow" hidden>
+      <button class="btn" type="button" id="adminBackBtn">← 매장 만들기 화면으로</button>
+    </div>
+    <form class="card" id="adminAddForm" autocomplete="off">
+      <h2>새 사장님 등록</h2>
+      <p class="muted small" style="margin:0 0 10px">등록한 이메일로 로그인하면 매장을 만들 수 있어요. 등록 후 앱 주소를 그 사장님께 보내 주세요.</p>
+      <div class="row">
+        <div class="field" style="flex:1 1 240px">
+          <label for="adminEmail">사장님 이메일</label>
+          <input id="adminEmail" type="email" required placeholder="owner@example.com">
+        </div>
+        <button class="btn primary" type="submit" id="adminAddBtn" style="align-self:flex-end">등록하기</button>
+      </div>
+    </form>
+    <div class="card">
+      <h2>누구나 매장 만들기</h2>
+      <p class="muted small" id="openState" style="margin:0 0 10px"></p>
+      <button class="btn" type="button" id="openToggle"></button>
+    </div>
+    <div class="card">
+      <h2>매장을 만들 수 있는 이메일</h2>
+      <div class="scroll"><table class="plain" id="creatorTable"></table></div>
+      <p class="muted small" style="margin:10px 0 0">등록을 지워도 그 사장님이 이미 만든 매장과 기록은 그대로 남아요. 새 매장만 못 만들게 됩니다. 관리자 지정·해제는 보안상 Supabase SQL Editor에서만 할 수 있어요.</p>
+    </div>
   </section>
 
   <!-- 현황 (사장) -->
