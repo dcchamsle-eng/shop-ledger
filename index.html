@@ -152,6 +152,16 @@ details.gloss dd { margin: 0; color: var(--muted); }
 table.plain { min-width: 0; }
 .copy { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .copy code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 13px; word-break: break-all; user-select: all; }
+/* 메뉴별 수량 */
+.field input[readonly] { background: var(--accent-soft); border-color: transparent; }
+.mq { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.mq-cat { display: flex; justify-content: space-between; gap: 8px; font-weight: 700; font-size: 14px; margin-top: 6px; }
+.mq-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 76px minmax(84px, auto); gap: 8px; align-items: center; font-size: 14px; }
+.mq-row > * { min-width: 0; }
+.mq-row .name { overflow-wrap: anywhere; }
+.mq-row input { width: 100%; font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; text-align: right; font-variant-numeric: tabular-nums; }
+.mq-row .amt { text-align: right; font-variant-numeric: tabular-nums; }
+.menus td .btn { padding: 4px 10px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -286,6 +296,7 @@ table.plain { min-width: 0; }
       <p class="muted small" id="wkNote" style="margin:8px 0 0"></p>
     </div>
     <form class="card" id="weekForm" autocomplete="off">
+      <div class="mq" id="menuQty" hidden></div>
       <div class="fields" id="weekFields"></div>
       <div class="live" id="weekLive" style="margin-top:14px"></div>
       <div class="row" style="margin-top:14px; justify-content:space-between">
@@ -301,6 +312,40 @@ table.plain { min-width: 0; }
       <h2>매장 나가기</h2>
       <p class="muted small" style="margin:0 0 10px">나가면 이 매장의 기록을 더 볼 수 없어요. 입력한 기록은 매장에 그대로 남습니다.</p>
       <button class="btn danger" id="leaveBtn" type="button">이 매장에서 나가기</button>
+    </div>
+  </section>
+
+  <!-- 메뉴 (사장) -->
+  <section class="view" id="view-menu" hidden>
+    <div class="banner warn" id="menuSetup" hidden>
+      <div>메뉴 기능을 쓰려면 Supabase SQL Editor에서 <b>supabase/migrations/004_menu.sql</b> 을 한 번 실행해 주세요. 실행 전에도 주간 입력은 지금처럼 쓸 수 있어요.</div>
+    </div>
+    <form class="card" id="menuForm" autocomplete="off">
+      <h2 id="menuFormTitle">메뉴 추가</h2>
+      <p class="muted small" style="margin:0 0 10px">판매하는 메뉴와 가격(VAT 포함 판매가)을 등록하면, 주간 입력에서 수량만 넣어 분류별 매출을 계산할 수 있어요. 직원도 메뉴와 가격을 보고 수량을 입력할 수 있어요.</p>
+      <div class="fields">
+        <div class="field">
+          <label for="menuName">메뉴 이름</label>
+          <input id="menuName" type="text" maxlength="40" required placeholder="예: 아메리카노">
+        </div>
+        <div class="field">
+          <label for="menuCat">분류</label>
+          <select id="menuCat"><option value="bev">음료</option><option value="alc">주류</option><option value="food">음식</option></select>
+        </div>
+        <div class="field">
+          <label for="menuPrice">가격 (원)</label>
+          <input id="menuPrice" type="text" inputmode="decimal" class="money" required placeholder="4,500">
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary" type="submit" id="menuSave">메뉴 추가</button>
+        <button class="btn" type="button" id="menuCancel" hidden>수정 취소</button>
+      </div>
+    </form>
+    <div class="card">
+      <h2>등록한 메뉴</h2>
+      <div class="scroll"><table class="plain menus" id="menuTable"></table></div>
+      <p class="muted small" style="margin:10px 0 0">가격을 바꿔도 이미 저장한 주의 매출은 그대로예요 (저장할 때의 가격을 기억합니다). 메뉴를 지워도 지난 주 기록에는 남아요.</p>
     </div>
   </section>
 
