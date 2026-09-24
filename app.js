@@ -58,7 +58,8 @@
   const WEEK_COLS = ["bev", "alc", "food", "cust", "tax", "free", "etc"];
   const MONTH_COLS = { wage: "wage", ins: "ins", sev: "sev", rent: "rent", mgmt: "mgmt", elec: "elec", water: "water",
                        card: "card", other: "other", ownh: "ownh", int: "interest" };   // calc 키 → DB 컬럼
-  const OWNER_TABS = [["dash", "현황"], ["week", "주간 입력"], ["month", "월 비용"], ["plan", "계획"], ["members", "구성원"]];
+  const MENU_CATS = [["bev", "음료"], ["alc", "주류"], ["food", "음식"]];   // weeks 매출 칸과 같은 키
+  const OWNER_TABS = [["dash", "현황"], ["week", "주간 입력"], ["menu", "메뉴"], ["month", "월 비용"], ["plan", "계획"], ["members", "구성원"]];
   const STAFF_TABS = [["week", "주간 입력"]];
   const APP_URL = location.origin + location.pathname;
 
@@ -91,13 +92,14 @@
     view: "week", wk: ymd(mondayOf(new Date())), mo: null, loading: false,
     dirty: { w: false, m: false, p: false },
     admin: false, creators: [],   // 관리자 모드: 화면 표시용 판단일 뿐, 실제 권한은 서버 함수가 매번 확인
+    menus: [], items: new Map(), menuReady: false, menuEdit: null, wkRows: [],   // 판매 메뉴 · 주별 메뉴 수량(week_start → 배열)
   };
   S.mo = ymOfWeek(S.wk);
   const isOwner = () => S.cur && S.cur.role === "owner";
   const storeTabs = () => (S.cur ? (isOwner() ? OWNER_TABS : STAFF_TABS) : []);
 
   // ---------- 화면 전환 ----------
-  const SCREENS = ["screen-config", "screen-login", "screen-nostore", "view-dash", "view-week", "view-month", "view-plan", "view-members", "view-admin"];
+  const SCREENS = ["screen-config", "screen-login", "screen-nostore", "view-dash", "view-week", "view-menu", "view-month", "view-plan", "view-members", "view-admin"];
   function show(id) { for (const s of SCREENS) $("#" + s).hidden = s !== id; }
 
   // ---------- 폼 공통 ----------
@@ -170,6 +172,7 @@
     const id = S.cur.store_id;
     const weeks = must(await S.sb.from("weeks").select("week_start," + WEEK_COLS.join(",") + ",memo").eq("store_id", id));
     S.weeks = new Map(weeks.map((r) => [r.week_start, Object.fromEntries([...WEEK_COLS.map((k) => [k, numOrNull(r[k])]), ["memo", r.memo]])]));
+    await loadMenus();
     if (isOwner()) {
       const months = must(await S.sb.from("months").select("month," + Object.values(MONTH_COLS).join(",") + ",memo").eq("store_id", id));
       S.months = new Map(months.map((r) => [r.month.slice(0, 7),
@@ -181,6 +184,21 @@
       for (const k of Object.keys(DEFAULT_PLAN)) if (isNum(saved[k])) S.plan[k] = saved[k];
     } else {
       S.months = new Map(); S.plan = { ...DEFAULT_PLAN }; S.planSaved = false;   // 직원은 계획·월 비용을 요청하지 않음
+    }
+  }
+  // 004_menu.sql 을 아직 실행하지 않은 서버면 메뉴 기능만 끄고 나머지는 그대로 동작
+  const missingTable = (e) => e && (e.code === "42P01" || e.code === "PGRST205" || /does not exist|schema cache/i.test(String(e.message || "")));
+  async function loadMenus() {
+    const id = S.cur.store_id;
+    const m = await S.sb.from("menu_items").select("id,name,cat,price,sort").eq("store_id", id).order("sort").order("name");
+    if (missingTable(m.error)) { S.menuReady = false; S.menus = []; S.items = new Map(); return; }
+    S.menuReady = true;
+    S.menus = must(m).map((r) => ({ ...r, price: Number(r.price) }));
+    const items = must(await S.sb.from("week_items").select("week_start,name,menu_id,cat,price,qty").eq("store_id", id));
+    S.items = new Map();
+    for (const r of items) {
+      if (!S.items.has(r.week_start)) S.items.set(r.week_start, []);
+      S.items.get(r.week_start).push({ ...r, price: Number(r.price), qty: Number(r.qty) });
     }
   }
   async function loadMembers() {
@@ -229,7 +247,7 @@
     const allowed = (isOwner() ? OWNER_TABS : STAFF_TABS).map(([v]) => v);
     if (!allowed.includes(S.view)) S.view = allowed[0];
     show("view-" + S.view);
-    ({ dash: renderDash, week: renderWeek, month: renderMonth, plan: renderPlan, members: renderMembers })[S.view]();
+    ({ dash: renderDash, week: renderWeek, menu: renderMenu, month: renderMonth, plan: renderPlan, members: renderMembers })[S.view]();
   }
 
   function statusPill(r) { return el("span", { className: "pill " + (r.done ? "" : "warn"), textContent: r.done ? "마감" : `진행 중 ${r.T}/${r.U}주` }); }
@@ -315,7 +333,13 @@
     $("#wkNote").textContent = `${ymLabel(ym)}로 집계됩니다.` + (mon.getMonth() !== sun.getMonth() ? " 두 달에 걸친 주라 목요일이 속한 달로 셉니다." : "");
     const data = S.weeks.get(S.wk);
     const st = $("#wkState"); st.textContent = data ? "저장됨" : "아직 없음"; st.className = "pill" + (data ? " good" : "");
-    if (!S.dirty.w) fillForm("w", WEEK_FIELDS, data);
+    if (!S.dirty.w) {
+      // 이전 주의 자동 계산 잠금을 먼저 풀고 채워야, 메뉴 수량이 없는 주의 직접 입력 금액이 지워지지 않음
+      for (const [k] of MENU_CATS) { const i = $("#w-" + k); i.readOnly = false; delete i.dataset.auto; }
+      fillForm("w", WEEK_FIELDS, data);
+      renderMenuQty();
+    }
+    menuSync();
     $("#weekDel").hidden = !data || !isOwner();
     $("#leaveCard").hidden = isOwner();
     weekLive();
@@ -332,6 +356,62 @@
     }
     if (!ids.length) list.append(el("p", { className: "muted small", style: "margin:0", textContent: "저장한 주가 아직 없습니다." }));
   }
+  // 이 주에 보여 줄 메뉴 줄: 현재 메뉴 + (지웠거나 바뀐) 저장된 수량. 저장된 줄은 저장 당시 가격을 유지.
+  function weekRows() {
+    const saved = [...(S.items.get(S.wk) || [])];
+    const take = (pred) => { const i = saved.findIndex(pred); return i < 0 ? null : saved.splice(i, 1)[0]; };
+    const rows = S.menus.map((m) => {
+      const s = take((x) => x.menu_id === m.id) || take((x) => !x.menu_id && x.name === m.name && x.cat === m.cat);
+      return { menu_id: m.id, name: m.name, cat: m.cat, price: s ? s.price : m.price, qty: s ? s.qty : null, oldPrice: !!s && s.price !== m.price };
+    });
+    for (const s of saved) rows.push({ menu_id: null, name: s.name, cat: s.cat, price: s.price, qty: s.qty, gone: true });
+    return rows;
+  }
+  function renderMenuQty() {
+    const box = $("#menuQty"); box.replaceChildren();
+    S.wkRows = S.menuReady ? weekRows() : [];
+    if (!S.wkRows.length) {
+      box.hidden = !(S.menuReady && isOwner());
+      box.append(el("p", { className: "muted small", style: "margin:0", textContent: "'메뉴' 탭에서 판매 메뉴와 가격을 등록하면, 여기서 수량만 넣어 매출을 계산할 수 있어요." }));
+      return;
+    }
+    box.hidden = false;
+    box.append(el("div", { className: "group-title", style: "margin:0", textContent: "메뉴별 판매 수량" }),
+      el("div", { className: "hint muted small", textContent: "수량을 넣은 분류는 아래 매출 칸이 자동으로 계산됩니다. 수량이 없는 분류는 금액을 직접 넣으세요." }));
+    S.wkRows.forEach((r, i) => { r.i = i; });
+    for (const [cat, label] of MENU_CATS) {
+      const rows = S.wkRows.filter((r) => r.cat === cat);
+      if (!rows.length) continue;
+      box.append(el("div", { className: "mq-cat" }, el("span", { textContent: label }), el("span", { className: "num", id: "mq-sum-" + cat })));
+      for (const r of rows) {
+        const id = "mq-" + r.i;
+        const input = el("input", { id, type: "text", inputMode: "decimal", value: isNum(r.qty) ? String(r.qty) : "", placeholder: "0" });
+        input.dataset.row = String(r.i);
+        const name = el("label", { htmlFor: id, className: "name", textContent: r.name });
+        if (r.gone) name.append(" ", el("span", { className: "pill warn", textContent: "지운 메뉴" }));
+        else if (r.oldPrice) name.append(" ", el("span", { className: "pill", textContent: "저장 당시 가격" }));
+        box.append(el("div", { className: "mq-row" }, name, el("span", { className: "muted num", textContent: won(r.price) + "원 ×" }), input,
+          el("span", { className: "amt", id: "mq-amt-" + r.i })));
+      }
+    }
+  }
+  // 수량 → 줄 금액·분류 합계 → 매출 칸. 수량이 하나라도 있는 분류는 칸을 잠그고 합계로 채움.
+  function menuSync() {
+    const sums = {};
+    for (const r of S.wkRows) {
+      const input = $("#mq-" + r.i); if (!input) continue;
+      r.qty = parseMoney(input.value);
+      const amt = isNum(r.qty) && r.qty > 0 ? r.price * r.qty : null;
+      $("#mq-amt-" + r.i).textContent = amt == null ? "" : won(amt) + "원";
+      if (amt != null) sums[r.cat] = (sums[r.cat] || 0) + amt;
+    }
+    for (const [cat] of MENU_CATS) {
+      const f = $("#w-" + cat), sum = $("#mq-sum-" + cat);
+      if (sum) sum.textContent = cat in sums ? won(sums[cat]) + "원" : "";
+      if (cat in sums) { f.value = sums[cat].toLocaleString("ko-KR"); f.readOnly = true; f.dataset.auto = "1"; }
+      else if (f.dataset.auto) { f.value = ""; f.readOnly = false; delete f.dataset.auto; }
+    }
+  }
   function weekLive() {
     const f = readForm("w", WEEK_FIELDS); const s = N(f.bev) + N(f.alc) + N(f.food);
     const parts = [el("span", {}, "매출 합계 ", el("b", { textContent: won(s) + "원" }))];
@@ -347,6 +427,35 @@
     $("#monthDel").hidden = !data;
     const wsales = [...S.weeks.entries()].filter(([id]) => ymOfWeek(id) === S.mo).reduce((a, [, w]) => a + C.weekSales(w), 0);
     $("#m-card").placeholder = wsales ? `비우면 약 ${won(wsales * S.plan.fee)}원으로 추정` : "비우면 계획 비율로 추정";
+  }
+  function resetMenuForm() {
+    S.menuEdit = null; $("#menuName").value = ""; $("#menuPrice").value = ""; $("#menuCat").value = "bev";
+    $("#menuFormTitle").textContent = "메뉴 추가"; $("#menuSave").textContent = "메뉴 추가"; $("#menuCancel").hidden = true;
+  }
+  function renderMenu() {
+    $("#menuSetup").hidden = S.menuReady; $("#menuForm").hidden = !S.menuReady;
+    const t = $("#menuTable"); t.replaceChildren();
+    t.append(el("thead", {}, el("tr", {}, ...["분류", "메뉴", "가격", ""].map((h, i) => el("th", { className: i === 2 ? "" : "l", textContent: h })))));
+    const tb = el("tbody");
+    for (const [cat, label] of MENU_CATS) for (const m of S.menus.filter((x) => x.cat === cat)) {
+      const edit = el("button", { type: "button", className: "btn", textContent: "수정" });
+      edit.addEventListener("click", () => {
+        S.menuEdit = m.id; $("#menuName").value = m.name; $("#menuCat").value = m.cat; $("#menuPrice").value = m.price.toLocaleString("ko-KR");
+        $("#menuFormTitle").textContent = `메뉴 수정 — ${m.name}`; $("#menuSave").textContent = "수정 저장"; $("#menuCancel").hidden = false;
+        window.scrollTo({ top: 0 }); $("#menuName").focus();
+      });
+      const del = el("button", { type: "button", className: "btn danger", textContent: "삭제" });
+      armDelete(del, "삭제", () => run(del, async () => {
+        const d = must(await S.sb.from("menu_items").delete().eq("store_id", S.cur.store_id).eq("id", m.id).select("id"));
+        if (!d.length) throw { code: "42501", message: "menu not deleted" };
+        if (S.menuEdit === m.id) resetMenuForm();
+        await loadMenus(); renderMenu();
+      }, `'${m.name}' 메뉴를 지웠어요.`));
+      tb.append(el("tr", {}, el("td", { className: "l muted", textContent: label }), el("td", { className: "l strong", textContent: m.name }),
+        el("td", { textContent: won(m.price) + "원" }), el("td", { className: "l" }, el("span", { className: "row" }, edit, del))));
+    }
+    if (!tb.children.length) tb.append(el("tr", {}, el("td", { colSpan: 4, className: "l muted", textContent: S.menuReady ? "아직 등록한 메뉴가 없어요." : "메뉴 기능이 아직 설치되지 않았어요." })));
+    t.append(tb);
   }
   function renderPlan() {
     if (!S.dirty.p) fillForm("p", PLAN_FIELDS, { ...S.plan, storeName: S.cur.name });
@@ -406,7 +515,7 @@
   $("#moPrev").addEventListener("click", () => goMonth(addMonths(S.mo, -1)));
   $("#moNext").addEventListener("click", () => goMonth(addMonths(S.mo, 1)));
   $("#moToday").addEventListener("click", () => goMonth(ymOfWeek(ymd(mondayOf(new Date())))));
-  $("#weekForm").addEventListener("input", () => { S.dirty.w = true; weekLive(); });
+  $("#weekForm").addEventListener("input", () => { S.dirty.w = true; menuSync(); weekLive(); });
   $("#monthForm").addEventListener("input", () => { S.dirty.m = true; });
   $("#planForm").addEventListener("input", () => { S.dirty.p = true; planLive(); });
 
@@ -415,8 +524,17 @@
     if (!["bev", "alc", "food"].some((k) => isNum(f[k]))) { toast("매출을 한 칸 이상 입력해 주세요."); return; }
     const id = S.wk, row = { store_id: S.cur.store_id, week_start: id, memo: f.memo || null };
     for (const k of WEEK_COLS) row[k] = f[k];   // 빈 칸은 null 로 저장 (0 으로 바꾸지 않음)
+    const items = S.wkRows.filter((r) => isNum(r.qty) && r.qty > 0)
+      .map((r) => ({ name: r.name, menu_id: r.menu_id, cat: r.cat, price: r.price, qty: r.qty }));
+    if (new Set(items.map((r) => r.name)).size < items.length) { toast("같은 이름의 메뉴가 두 줄 있어요. 한쪽 수량을 비우고 저장해 주세요."); return; }
     run($("#weekSave"), async () => {
-      must(await S.sb.from("weeks").upsert(row, { onConflict: "store_id,week_start" }));
+      if (S.menuReady) {
+        // 주간 합계와 메뉴 수량을 한 번에 저장 (중간에 실패해도 둘이 어긋나지 않게)
+        const { store_id, week_start, ...fields } = row;
+        must(await S.sb.rpc("save_week", { p_store: store_id, p_week: week_start, p_row: fields, p_items: items }));
+      } else {
+        must(await S.sb.from("weeks").upsert(row, { onConflict: "store_id,week_start" }));
+      }
       S.dirty.w = false; await refresh();
     }, `${Number(id.slice(5, 7))}/${Number(id.slice(8))} 주를 저장했어요.`);
   });
@@ -445,7 +563,26 @@
       S.dirty.p = false; await refresh();
     }, "계획을 저장했어요.");
   });
-  $("#planReset").addEventListener("click", () => { fillForm("p", PLAN_FIELDS, { ...DEFAULT_PLAN, storeName: $("#p-storeName").value }); S.dirty.p = true; planLive(); toast("예시 값을 채웠어요. 저장해야 반영됩니다."); });
+  $("#menuPrice").addEventListener("focus", (e) => { e.target.value = e.target.value.replace(/,/g, ""); });
+  $("#menuPrice").addEventListener("blur", (e) => { const v = parseMoney(e.target.value); e.target.value = v == null ? "" : v.toLocaleString("ko-KR"); });
+  $("#menuCancel").addEventListener("click", resetMenuForm);
+  $("#menuForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = $("#menuName").value.trim(), cat = $("#menuCat").value, price = parseMoney($("#menuPrice").value), editing = S.menuEdit;
+    if (!name) { toast("메뉴 이름을 입력해 주세요."); return; }
+    if (!isNum(price)) { toast("가격을 입력해 주세요."); return; }
+    if (S.menus.some((m) => m.name === name && m.id !== editing)) { toast("같은 이름의 메뉴가 이미 있어요."); return; }
+    run($("#menuSave"), async () => {
+      let res;
+      if (editing) res = await S.sb.from("menu_items").update({ name, cat, price }).eq("store_id", S.cur.store_id).eq("id", editing).select("id");
+      else res = await S.sb.from("menu_items").insert({ store_id: S.cur.store_id, name, cat, price, sort: S.menus.length });
+      if (res.error && res.error.code === "23505") throw { friendly: "같은 이름의 메뉴가 이미 있어요." };
+      must(res);
+      if (editing && !res.data.length) throw { code: "42501", message: "menu not updated" };
+      resetMenuForm(); await loadMenus(); renderMenu();
+    }, editing ? `'${name}' 메뉴를 고쳤어요.` : `'${name}' 메뉴를 추가했어요.`);
+  });
+  $("#planReset").addEventListener("click",() => { fillForm("p", PLAN_FIELDS, { ...DEFAULT_PLAN, storeName: $("#p-storeName").value }); S.dirty.p = true; planLive(); toast("예시 값을 채웠어요. 저장해야 반영됩니다."); });
   armDelete($("#weekDel"), "이 주 삭제", () => { const id = S.wk; return run($("#weekDel"), async () => {
     const d = must(await S.sb.from("weeks").delete().eq("store_id", S.cur.store_id).eq("week_start", id).select("week_start"));
     if (!d.length) throw { code: "42501", message: "not deleted" };
@@ -490,6 +627,12 @@
     for (const id of [...S.weeks.keys()].sort()) { const w = S.weeks.get(id); lines.push([id, ymOfWeek(id), ...wf.map((f) => q(w[f.k])), q(w.memo)].join(",")); }
     lines.push("", "[월간]", ["월", ...mf.map((f) => f.label), "메모"].map(q).join(","));
     for (const id of [...S.months.keys()].sort()) { const m = S.months.get(id); lines.push([id, ...mf.map((f) => q(m[f.k])), q(m.memo)].join(",")); }
+    if (S.items.size) {
+      const catName = Object.fromEntries(MENU_CATS);
+      lines.push("", "[메뉴별 판매]", ["주 시작일(월)", "메뉴", "분류", "단가", "수량", "금액"].map(q).join(","));
+      for (const id of [...S.items.keys()].sort()) for (const r of S.items.get(id))
+        lines.push([id, q(r.name), q(catName[r.cat]), q(r.price), q(r.qty), q(r.price * r.qty)].join(","));
+    }
     const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     const a = el("a", { href: URL.createObjectURL(blob), download: `${S.cur.name}_가계부_${ymd(new Date())}.csv` });
     document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -499,7 +642,7 @@
     const v = e.target.value;
     if (v === "__new") { showCreate(true); return; }
     S.cur = S.stores.find((s) => s.store_id === v) || S.cur; store.set("ledger.store", S.cur.store_id);
-    S.dirty = { w: false, m: false, p: false };
+    S.dirty = { w: false, m: false, p: false }; resetMenuForm();
     await refresh();
   });
   $("#createForm").addEventListener("submit", (e) => {
@@ -612,7 +755,7 @@
   }
   function signedOut() {
     S.user = null; S.stores = []; S.cur = null; S.weeks = new Map(); S.months = new Map(); S.invites = []; S.members = [];
-    S.admin = false; S.creators = [];
+    S.admin = false; S.creators = []; S.menus = []; S.items = new Map(); S.wkRows = []; resetMenuForm();
     // 다음에 로그인하는 사람이 이전 사람의 화면 위치(보던 주·달·탭)를 이어받지 않게 초기화
     S.view = ""; S.wk = ymd(mondayOf(new Date())); S.mo = ymOfWeek(S.wk); S.dirty = { w: false, m: false, p: false };
     renderHeader(); $("#tabs").hidden = true; show("screen-login");
